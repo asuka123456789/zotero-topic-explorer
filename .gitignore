@@ -1,0 +1,7 @@
+node_modules/
+.scaffold/
+coverage/
+.env*
+*.log
+*.sqlite*
+*.tsbuildinfo

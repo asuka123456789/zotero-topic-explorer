@@ -1,0 +1,12 @@
+{
+  "extends": "zotero-types/entries/sandbox/",
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src", "typings"],
+  "exclude": ["node_modules", ".scaffold", "addon", "test"]
+}
