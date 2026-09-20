@@ -67,7 +67,7 @@ npm run test:integration
 
 `test:integration` 会用 `scripts/test-isolated.mjs` 启动一个只使用 `.scaffold/test` 隔离 profile/data 的 Zotero 实例，需要 `ZOTERO_PLUGIN_ZOTERO_BIN_PATH` 指向 Zotero 可执行文件，并显式设置 `TOPIC_EXPLORER_ALLOW_GUI=1`（scaffold 在 Windows 上会显示窗口）。集成测试里的“模型”是本地假传输，不产生任何网络请求。
 
-真实模型联调是可选的：再设置 `TOPIC_EXPLORER_LIVE_BASE_URL`、`TOPIC_EXPLORER_LIVE_API_KEY` 和 `TOPIC_EXPLORER_LIVE_MODELS`（探索、文献审查、可行性、主控四个模型名，逗号分隔）后，`test/integration/live.test.ts` 会用三条合成材料跑一轮完整讨论；密钥只在会话内存中，结果写到 `.scaffold/test/data/topic-explorer-live-result.json`。验证记录见 [docs/test-record.md](docs/test-record.md)。
+真实模型联调是可选的：设置 `TOPIC_EXPLORER_LIVE_CONFIG`（长度为 4 的 JSON 数组，按探索、文献审查、可行性、主控顺序给出 `{ "model", "baseURL", "apiKey" }`，不同角色可指向不同服务），或用简化变量 `TOPIC_EXPLORER_LIVE_BASE_URL`、`TOPIC_EXPLORER_LIVE_API_KEY`、`TOPIC_EXPLORER_LIVE_MODELS`（4 个模型名，逗号分隔，共用同一服务）后，`test/integration/live.test.ts` 会用三条合成材料跑一轮完整讨论；密钥只在会话内存中，结果写到 `.scaffold/test/data/topic-explorer-live-result.json`。验证记录见 [docs/test-record.md](docs/test-record.md)。
 
 ## 许可与归属
 

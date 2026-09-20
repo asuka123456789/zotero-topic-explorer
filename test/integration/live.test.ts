@@ -20,20 +20,69 @@ import { CredentialStore } from "../../src/zotero/credentials.ts";
 declare const expect: Chai.ExpectStatic;
 
 /**
- * 真实模型联调（可选）。只有同时提供以下环境变量才会执行，否则整组跳过：
- * - TOPIC_EXPLORER_LIVE_BASE_URL   OpenAI-compatible 服务地址（https）
- * - TOPIC_EXPLORER_LIVE_API_KEY    API key（只经 CredentialStore 会话内存，不落盘）
- * - TOPIC_EXPLORER_LIVE_MODELS     "explorer,literature,feasibility,moderator" 四个模型名，逗号分隔
- * 材料全部是合成文本，不读取任何真实文库内容。
+ * 真实模型联调（可选）。未提供配置时整组跳过。两种配置方式：
+ * 1. TOPIC_EXPLORER_LIVE_CONFIG：JSON 数组，按 探索、文献审查、可行性、主控 顺序给 4 项
+ *    `{ "model", "baseURL", "apiKey", "allowLocal"? }`；不同角色可用不同服务与密钥。
+ * 2. 简化变量：TOPIC_EXPLORER_LIVE_BASE_URL、TOPIC_EXPLORER_LIVE_API_KEY、
+ *    TOPIC_EXPLORER_LIVE_MODELS（4 个模型名，逗号分隔，共用同一服务与密钥）。
+ * 密钥只经 CredentialStore 会话内存，不落盘；材料全部是合成文本。
  */
 
 const ISOLATED_PREF = "extensions.zotero.zotero-topic-explorer.test.isolated";
+const ROLES: Role[] = ["explorer", "literature", "feasibility", "moderator"];
+
+interface LiveRoleConfig {
+  model: string;
+  baseURL: string;
+  apiKey: string;
+  allowLocal?: boolean;
+}
 
 function env(name: string): string {
   try {
     return Services.env.exists(name) ? Services.env.get(name) : "";
   } catch {
     return "";
+  }
+}
+
+function readLiveConfig(): LiveRoleConfig[] | null {
+  const json = env("TOPIC_EXPLORER_LIVE_CONFIG");
+  if (json) {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 4) {
+      throw new Error("TOPIC_EXPLORER_LIVE_CONFIG 必须是长度为 4 的数组");
+    }
+    return parsed.map((entry) => {
+      const item = entry as Partial<LiveRoleConfig>;
+      if (!item.model || !item.baseURL || !item.apiKey) {
+        throw new Error("TOPIC_EXPLORER_LIVE_CONFIG 每项需要 model、baseURL、apiKey");
+      }
+      return {
+        model: item.model,
+        baseURL: item.baseURL,
+        apiKey: item.apiKey,
+        allowLocal: item.allowLocal === true,
+      };
+    });
+  }
+  const baseURL = env("TOPIC_EXPLORER_LIVE_BASE_URL");
+  const apiKey = env("TOPIC_EXPLORER_LIVE_API_KEY");
+  const models = env("TOPIC_EXPLORER_LIVE_MODELS")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (!baseURL || !apiKey || models.length !== 4) {
+    return null;
+  }
+  return models.map((model) => ({ model, baseURL, apiKey }));
+}
+
+function hostOf(baseURL: string): string {
+  try {
+    return new URL(baseURL).host;
+  } catch {
+    return "?";
   }
 }
 
@@ -80,13 +129,15 @@ interface StepUsage {
 
 describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
   this.timeout(900000);
-  let baseURL = "";
-  let apiKey = "";
-  let modelNames: string[] = [];
-  let enabled = false;
+  let liveConfig: LiveRoleConfig[] | null = null;
   let store: SQLiteExplorerStore | null = null;
   let finalRun: Run | null = null;
-  const requestLog: Array<{ role: string; model: string; bytes: number }> = [];
+  const requestLog: Array<{
+    role: string;
+    model: string;
+    host: string;
+    bytes: number;
+  }> = [];
 
   before(function () {
     const dataDir = Zotero.DataDirectory.dir.replace(/\\/g, "/");
@@ -96,14 +147,8 @@ describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
     ) {
       throw new Error("联调只允许在 .scaffold/test/data 隔离文库中运行");
     }
-    baseURL = env("TOPIC_EXPLORER_LIVE_BASE_URL");
-    apiKey = env("TOPIC_EXPLORER_LIVE_API_KEY");
-    modelNames = env("TOPIC_EXPLORER_LIVE_MODELS")
-      .split(",")
-      .map((name) => name.trim())
-      .filter(Boolean);
-    enabled = !!baseURL && !!apiKey && modelNames.length === 4;
-    if (!enabled) {
+    liveConfig = readLiveConfig();
+    if (!liveConfig) {
       this.skip();
     }
   });
@@ -127,9 +172,12 @@ describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
       PathUtils.join(Zotero.DataDirectory.dir, "topic-explorer-live-result.json"),
       JSON.stringify(
         {
-          enabled,
-          baseURL,
-          models: modelNames,
+          enabled: liveConfig !== null,
+          roles: (liveConfig ?? []).map((item, index) => ({
+            role: ROLES[index],
+            model: item.model,
+            host: hostOf(item.baseURL),
+          })),
           state: finalRun?.state ?? null,
           requestsUsed: finalRun?.requestsUsed ?? null,
           error: finalRun?.error ?? null,
@@ -143,6 +191,7 @@ describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
   });
 
   it("用真实服务完成 6 步讨论并生成卡片（合成材料）", async function () {
+    const config = liveConfig!;
     const database = new Zotero.DBConnection(
       PathUtils.join(Zotero.DataDirectory.dir, "topic-explorer-live.sqlite"),
     );
@@ -172,20 +221,18 @@ describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
 
     // 密钥只放会话内存，不写 Login Manager。
     const credentials = new CredentialStore();
-    const roles: Role[] = ["explorer", "literature", "feasibility", "moderator"];
     const models = {} as Record<Role, ModelConfig>;
-    roles.forEach((role, index) => {
+    for (const [index, role] of ROLES.entries()) {
+      const item = config[index];
       models[role] = {
         id: `live-${role}`,
         label: `live ${role}`,
-        baseURL,
-        model: modelNames[index],
+        baseURL: item.baseURL,
+        model: item.model,
         outputTokenField: "max_tokens",
-        allowLocal: false,
+        allowLocal: item.allowLocal === true,
       };
-    });
-    for (const role of roles) {
-      await credentials.set(models[role].id, apiKey, false);
+      await credentials.set(models[role].id, item.apiKey, false);
     }
     const real = createTransport((configId) => credentials.get(configId));
     const transport: ChatTransport = {
@@ -193,6 +240,7 @@ describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
         requestLog.push({
           role: request.config.id,
           model: request.config.model,
+          host: hostOf(request.config.baseURL),
           bytes: new TextEncoder().encode(JSON.stringify(request.messages)).length,
         });
         return real.complete(request);
@@ -207,7 +255,7 @@ describe("Zotero Topic Explorer 真实模型联调（可选）", function () {
       budget: {
         maxRequests: 6,
         maxInputBytes: 96000,
-        maxOutputTokens: 8000,
+        maxOutputTokens: 12000,
         requestTimeoutMs: 240000,
         maxDurationMs: 1500000,
       },
